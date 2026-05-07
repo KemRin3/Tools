@@ -1,7 +1,7 @@
 """Parser for the project builder DSL."""
 
 import os
-from pathlib import PureWindowsPath
+from pathlib import PurePath, PureWindowsPath
 
 from models import Action, ProjectItem
 
@@ -14,9 +14,9 @@ def parse_dsl(text: str) -> list[ProjectItem]:
     """Parse DSL text into project items.
 
     Supported commands:
-    - dir: ABSOLUTE_PATH
-    - file: ABSOLUTE_PATH
-    - write: ABSOLUTE_PATH
+    - dir: RELATIVE_PATH
+    - file: RELATIVE_PATH
+    - write: RELATIVE_PATH
       file content
       ---
     """
@@ -74,11 +74,21 @@ def _read_path(line: str, command: str, line_number: int) -> str:
     if not path:
         raise ParseError(f"Line {line_number}: {command} path is empty.")
 
-    if not _is_absolute_path(path):
-        raise ParseError(f"Line {line_number}: relative paths are not allowed: {path}")
+    if _is_absolute_path(path):
+        raise ParseError(f"Line {line_number}: absolute paths are not allowed: {path}")
+
+    if _contains_parent_reference(path):
+        raise ParseError(
+            f"Line {line_number}: parent directory references are not allowed: {path}"
+        )
 
     return path
 
 
 def _is_absolute_path(path: str) -> bool:
-    return os.path.isabs(path) or PureWindowsPath(path).is_absolute()
+    windows_path = PureWindowsPath(path)
+    return os.path.isabs(path) or windows_path.is_absolute() or bool(windows_path.drive)
+
+
+def _contains_parent_reference(path: str) -> bool:
+    return ".." in PurePath(path).parts or ".." in PureWindowsPath(path).parts

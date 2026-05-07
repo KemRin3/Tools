@@ -6,13 +6,14 @@ from models import Action, ProjectItem
 
 
 class ProjectBuilder:
-    """Create directories and files from parsed project items."""
+    """Create directories and files under a selected base directory."""
 
-    def __init__(self) -> None:
+    def __init__(self, base_dir: str | Path) -> None:
+        self.base_dir = Path(base_dir).resolve()
         self.logs: list[str] = []
 
     def build(self, items: list[ProjectItem]) -> list[str]:
-        """Build all items and return creation logs."""
+        """Build all items under base_dir and return creation logs."""
 
         self.logs = []
         for item in items:
@@ -20,7 +21,7 @@ class ProjectBuilder:
         return self.logs
 
     def _build_item(self, item: ProjectItem) -> None:
-        path = Path(item.path)
+        path = self._full_path(item.path)
 
         if path.exists():
             self._log(f"SKIP exists: {path}")
@@ -44,6 +45,9 @@ class ProjectBuilder:
             return
 
         self._log(f"SKIP unknown action: {item.action} {path}")
+
+    def _full_path(self, relative_path: str) -> Path:
+        return self.base_dir / Path(relative_path)
 
     def _create_parent(self, path: Path) -> None:
         parent = path.parent
