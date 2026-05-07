@@ -20,6 +20,53 @@
 python Common\project_builder\main.py
 ```
 
+## EXE化する方法
+
+Windows では PyInstaller を使うのが簡単です。以下は PowerShell での手順です。
+
+### 1. 仮想環境を作成する
+
+```powershell
+cd C:\path\to\Tools
+py -3.12 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+```
+
+### 2. PyInstaller をインストールする
+
+```powershell
+python -m pip install pyinstaller
+```
+
+### 3. EXEを作成する
+
+```powershell
+python -m PyInstaller --onefile --windowed --name ProjectBuilder Common\project_builder\main.py
+```
+
+作成後、以下の EXE を実行します。
+
+```powershell
+.\dist\ProjectBuilder.exe
+```
+
+### オプション
+
+- `--onefile`: 1つの EXE にまとめます。
+- `--windowed`: コンソール画面を表示せず GUI のみ起動します。
+- `--name ProjectBuilder`: 出力 EXE 名を `ProjectBuilder.exe` にします。
+
+### 再ビルド時のクリーンアップ
+
+ビルド結果を作り直したい場合は、`build`、`dist`、`ProjectBuilder.spec` を削除してから再実行します。
+
+```powershell
+Remove-Item -Recurse -Force build, dist
+Remove-Item -Force ProjectBuilder.spec
+python -m PyInstaller --onefile --windowed --name ProjectBuilder Common\project_builder\main.py
+```
+
 ## DSL 仕様
 
 ```text
