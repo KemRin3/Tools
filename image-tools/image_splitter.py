@@ -5,6 +5,7 @@ External dependency: Pillow
 
 from __future__ import annotations
 
+import json
 import math
 import tkinter as tk
 from pathlib import Path
@@ -64,6 +65,19 @@ class ImageSplitterApp:
         self.cell_padding_var = tk.StringVar(value="0")
         self.scale_limit_var = tk.StringVar(value="2.0")
         self.min_area_var = tk.StringVar(value="1")
+        self.cut_edit_var = tk.BooleanVar(value=False)
+        self.snap_var = tk.BooleanVar(value=True)
+        self.snap_unit_var = tk.StringVar(value="8")
+        self.min_cell_size_var = tk.StringVar(value="128")
+        self.selected_line_var = tk.StringVar(value="選択中の線: なし")
+
+        self.vertical_cut_lines: list[int] = []
+        self.horizontal_cut_lines: list[int] = []
+        self.cut_grid_signature: Optional[tuple[int, int, int, int]] = None
+        self.dragging_cut_line: Optional[tuple[str, int]] = None
+        self.before_preview_scale = 1.0
+        self.before_preview_offset = (0, 0)
+        self.before_preview_size = (0, 0)
 
         self._build_ui()
         self._bind_events()
@@ -216,13 +230,45 @@ class ImageSplitterApp:
         ttk.Label(cell_frame, text="min_area").grid(row=6, column=0, sticky="w", pady=(8, 0))
         ttk.Entry(cell_frame, textvariable=self.min_area_var, width=10).grid(row=6, column=1, sticky="ew", padx=(8, 0), pady=(8, 0))
 
+        cut_frame = ttk.LabelFrame(parent, text="カット線編集", padding=10)
+        cut_frame.grid(row=6, column=0, sticky="ew", pady=(0, 10))
+        cut_frame.columnconfigure(1, weight=1)
+        ttk.Checkbutton(
+            cut_frame,
+            text="カット線編集モード",
+            variable=self.cut_edit_var,
+            command=self._on_cut_edit_changed,
+        ).grid(row=0, column=0, columnspan=2, sticky="w")
+        ttk.Checkbutton(cut_frame, text="スナップ", variable=self.snap_var).grid(row=1, column=0, sticky="w", pady=(8, 0))
+        ttk.Combobox(
+            cut_frame,
+            textvariable=self.snap_unit_var,
+            values=("1", "8", "16", "32", "64"),
+            state="readonly",
+            width=8,
+        ).grid(row=1, column=1, sticky="ew", padx=(8, 0), pady=(8, 0))
+        ttk.Label(cut_frame, text="min_cell_size").grid(row=2, column=0, sticky="w", pady=(8, 0))
+        ttk.Entry(cut_frame, textvariable=self.min_cell_size_var, width=10).grid(row=2, column=1, sticky="ew", padx=(8, 0), pady=(8, 0))
+        ttk.Button(cut_frame, text="均等割り付けに戻す", command=self.reset_cut_lines).grid(
+            row=3, column=0, columnspan=2, sticky="ew", pady=(8, 0)
+        )
+        ttk.Button(cut_frame, text="カット線JSON保存", command=self.save_cut_lines_json).grid(
+            row=4, column=0, columnspan=2, sticky="ew", pady=(8, 0)
+        )
+        ttk.Button(cut_frame, text="カット線JSON読み込み", command=self.load_cut_lines_json).grid(
+            row=5, column=0, columnspan=2, sticky="ew", pady=(8, 0)
+        )
+        ttk.Label(cut_frame, textvariable=self.selected_line_var, wraplength=260).grid(
+            row=6, column=0, columnspan=2, sticky="ew", pady=(8, 0)
+        )
+
         output_frame = ttk.LabelFrame(parent, text="出力フォルダ", padding=10)
-        output_frame.grid(row=6, column=0, sticky="ew", pady=(0, 10))
+        output_frame.grid(row=7, column=0, sticky="ew", pady=(0, 10))
         output_frame.columnconfigure(0, weight=1)
         ttk.Button(output_frame, text="出力フォルダを選択", command=self.select_output_dir).grid(row=0, column=0, sticky="ew")
         ttk.Label(output_frame, textvariable=self.output_dir_var, wraplength=260).grid(row=1, column=0, sticky="ew", pady=(8, 0))
 
-        ttk.Button(parent, text="分割実行", command=self.split_image).grid(row=7, column=0, sticky="ew", ipady=6)
+        ttk.Button(parent, text="分割実行", command=self.split_image).grid(row=8, column=0, sticky="ew", ipady=6)
 
     def _build_preview(self, parent: ttk.Frame) -> None:
         """Create the preview area."""
@@ -232,12 +278,27 @@ class ImageSplitterApp:
         preview_frame.columnconfigure(1, weight=1)
         preview_frame.rowconfigure(1, weight=1)
 
-        ttk.Label(preview_frame, text="処理前").grid(row=0, column=0, sticky="ew")
+        ttk.Label(preview_frame, text="処理前 / カット線編集").grid(row=0, column=0, sticky="ew")
         ttk.Label(preview_frame, text="処理後").grid(row=0, column=1, sticky="ew", padx=(8, 0))
-        self.preview_before_label = ttk.Label(preview_frame, text="画像を選択すると表示します", anchor="center")
+        self.preview_before_label = tk.Canvas(
+            preview_frame,
+            width=PREVIEW_MAX_SIZE[0],
+            height=PREVIEW_MAX_SIZE[1],
+            background="#222222",
+            highlightthickness=0,
+        )
         self.preview_before_label.grid(row=1, column=0, sticky="nsew")
-        self.preview_after_label = ttk.Label(preview_frame, text="画像を選択すると表示します", anchor="center")
+        self.preview_after_label = tk.Canvas(
+            preview_frame,
+            width=PREVIEW_MAX_SIZE[0],
+            height=PREVIEW_MAX_SIZE[1],
+            background="#222222",
+            highlightthickness=0,
+        )
         self.preview_after_label.grid(row=1, column=1, sticky="nsew", padx=(8, 0))
+        self.preview_before_label.bind("<ButtonPress-1>", self._on_cut_line_press)
+        self.preview_before_label.bind("<B1-Motion>", self._on_cut_line_drag)
+        self.preview_before_label.bind("<ButtonRelease-1>", self._on_cut_line_release)
 
     def _build_log(self, parent: ttk.Frame) -> None:
         """Create the execution log area."""
@@ -273,6 +334,10 @@ class ImageSplitterApp:
             self.cell_padding_var,
             self.scale_limit_var,
             self.min_area_var,
+            self.cut_edit_var,
+            self.snap_var,
+            self.snap_unit_var,
+            self.min_cell_size_var,
         ):
             variable.trace_add("write", lambda *_: self.update_preview())
 
@@ -315,10 +380,18 @@ class ImageSplitterApp:
         cols = self._safe_positive_int(self.cols_var.get())
 
         before = self.loaded_image.convert("RGBA").copy()
-        self._set_preview_image(before, self.preview_before_label, "before", rows, cols)
+        if rows and cols and self.cut_edit_var.get():
+            self._ensure_cut_lines(rows, cols, before.size)
+        before_rows = rows if not self.cut_edit_var.get() else None
+        before_cols = cols if not self.cut_edit_var.get() else None
+        self._set_preview_image(before, self.preview_before_label, "before", before_rows, before_cols)
+        if rows and cols and self.cut_edit_var.get():
+            self._draw_cut_lines_on_canvas()
 
         try:
-            if rows and cols and self._uses_cell_pipeline():
+            if rows and cols and self.cut_edit_var.get():
+                after = self._build_cut_line_preview(rows, cols)
+            elif rows and cols and self._uses_cell_pipeline():
                 after = self._build_cell_pipeline_preview(rows, cols)
             elif rows and cols:
                 after = self._prepare_source_image(rows=rows, cols=cols, preview=True)
@@ -326,8 +399,8 @@ class ImageSplitterApp:
                 after = before.copy()
         except (ValueError, OSError):
             after = before.copy()
-        preview_rows = rows if not self._uses_cell_pipeline() else None
-        preview_cols = cols if not self._uses_cell_pipeline() else None
+        preview_rows = rows if not self._uses_cell_pipeline() and not self.cut_edit_var.get() else None
+        preview_cols = cols if not self._uses_cell_pipeline() and not self.cut_edit_var.get() else None
         self._set_preview_image(after, self.preview_after_label, "after", preview_rows, preview_cols)
 
     def split_image(self) -> None:
@@ -353,7 +426,9 @@ class ImageSplitterApp:
 
         try:
             self.output_dir.mkdir(parents=True, exist_ok=True)
-            if self._uses_cell_pipeline():
+            if self.cut_edit_var.get():
+                self._save_cut_line_tiles(rows, cols, base_name, digits)
+            elif self._uses_cell_pipeline():
                 self._save_cell_pipeline_tiles(rows, cols, base_name, digits)
             else:
                 self._save_whole_image_tiles(rows, cols, base_name, digits)
@@ -366,6 +441,334 @@ class ImageSplitterApp:
 
         self.log(f"出力完了: {total} ファイルを保存しました ({self.output_dir})")
         messagebox.showinfo("出力完了", f"{total} ファイルを保存しました。")
+
+    def _save_cut_line_tiles(self, rows: int, cols: int, base_name: str, digits: int) -> None:
+        """Save tiles using the editable cut-line boundaries."""
+        if self.loaded_image is None:
+            raise OSError("画像が読み込まれていません。")
+
+        source = self.loaded_image.convert("RGBA")
+        self._validate_cut_line_settings(rows, cols, source.size)
+        self._ensure_cut_lines(rows, cols, source.size)
+        settings = self._cell_pipeline_settings(preview=False)
+        settings["fit_mode"] = str(settings["fit_mode"] or "contain")
+        settings["alignment"] = str(settings["alignment"] or "center")
+
+        for row, col, tile in self._iter_cut_line_tiles(source):
+            index = row * cols + col + 1
+            processed = self._process_cell_tile(tile, settings)
+            processed.save(self.output_dir / f"{base_name}_{index:0{digits}d}.png", "PNG")
+
+    def _build_cut_line_preview(self, rows: int, cols: int) -> Image.Image:
+        """Build a processed preview using the editable cut-line grid."""
+        if self.loaded_image is None:
+            raise OSError("画像が読み込まれていません。")
+
+        source = self.loaded_image.convert("RGBA")
+        self._ensure_cut_lines(rows, cols, source.size)
+        settings = self._cell_pipeline_settings(preview=True)
+        preview = Image.new(
+            "RGBA",
+            (int(settings["output_width"]) * cols, int(settings["output_height"]) * rows),
+            self._background_fill(str(settings["background"])),
+        )
+        for row, col, tile in self._iter_cut_line_tiles(source):
+            processed = self._process_cell_tile(tile, settings)
+            preview.paste(processed, (col * int(settings["output_width"]), row * int(settings["output_height"])))
+        return preview
+
+    def _iter_cut_line_tiles(self, source: Image.Image):
+        """Yield tiles from the current editable cut-line coordinates."""
+        for row in range(len(self.horizontal_cut_lines) - 1):
+            upper = self.horizontal_cut_lines[row]
+            lower = self.horizontal_cut_lines[row + 1]
+            for col in range(len(self.vertical_cut_lines) - 1):
+                left = self.vertical_cut_lines[col]
+                right = self.vertical_cut_lines[col + 1]
+                yield row, col, source.crop((left, upper, right, lower))
+
+    def _ensure_cut_lines(self, rows: int, cols: int, image_size: tuple[int, int], force: bool = False) -> None:
+        """Initialize editable cut lines from rows/cols, preserving them while the signature matches."""
+        width, height = image_size
+        signature = (width, height, rows, cols)
+        if not force and self.cut_grid_signature == signature and self._cut_lines_match(rows, cols, image_size):
+            return
+
+        self.vertical_cut_lines = [round(width * col / cols) for col in range(cols + 1)]
+        self.horizontal_cut_lines = [round(height * row / rows) for row in range(rows + 1)]
+        self.vertical_cut_lines[0] = 0
+        self.vertical_cut_lines[-1] = width
+        self.horizontal_cut_lines[0] = 0
+        self.horizontal_cut_lines[-1] = height
+        self.cut_grid_signature = signature
+        self._update_selected_line_label()
+
+    def _cut_lines_match(self, rows: int, cols: int, image_size: tuple[int, int]) -> bool:
+        """Return True when current cut lines fit the current image and grid settings."""
+        width, height = image_size
+        return (
+            len(self.vertical_cut_lines) == cols + 1
+            and len(self.horizontal_cut_lines) == rows + 1
+            and self.vertical_cut_lines[0] == 0
+            and self.horizontal_cut_lines[0] == 0
+            and self.vertical_cut_lines[-1] == width
+            and self.horizontal_cut_lines[-1] == height
+        )
+
+    def _validate_cut_line_settings(self, rows: int, cols: int, image_size: tuple[int, int]) -> None:
+        """Validate min cell size and current cut-line coordinates before export."""
+        min_cell_size = self._validate_min_cell_size(preview=False)
+        width, height = image_size
+        if min_cell_size * cols > width or min_cell_size * rows > height:
+            raise ValueError("min_cell_sizeが画像サイズとrows/colsに対して大きすぎます。")
+        self._ensure_cut_lines(rows, cols, image_size)
+        for left, right in zip(self.vertical_cut_lines, self.vertical_cut_lines[1:]):
+            if right - left < min_cell_size:
+                raise ValueError("縦カット線の間隔がmin_cell_size未満です。")
+        for top, bottom in zip(self.horizontal_cut_lines, self.horizontal_cut_lines[1:]):
+            if bottom - top < min_cell_size:
+                raise ValueError("横カット線の間隔がmin_cell_size未満です。")
+
+    def reset_cut_lines(self) -> None:
+        """Reset editable cut lines back to an even rows x cols grid."""
+        if self.loaded_image is None:
+            self._show_error("画像未選択", "画像ファイルを選択してください。")
+            return
+        rows = self._validate_positive_int(self.rows_var.get(), "rows")
+        cols = self._validate_positive_int(self.cols_var.get(), "cols")
+        if rows is None or cols is None:
+            return
+        self._ensure_cut_lines(rows, cols, self.loaded_image.size, force=True)
+        self.log("カット線を均等割り付けに戻しました。")
+        self.update_preview()
+
+    def save_cut_lines_json(self) -> None:
+        """Save current editable cut lines to a JSON preset."""
+        if self.loaded_image is None:
+            self._show_error("画像未選択", "画像ファイルを選択してください。")
+            return
+        rows = self._validate_positive_int(self.rows_var.get(), "rows")
+        cols = self._validate_positive_int(self.cols_var.get(), "cols")
+        if rows is None or cols is None:
+            return
+        self._ensure_cut_lines(rows, cols, self.loaded_image.size)
+        file_name = filedialog.asksaveasfilename(
+            title="カット線JSON保存",
+            defaultextension=".json",
+            filetypes=(("JSON files", "*.json"), ("All files", "*.*")),
+        )
+        if not file_name:
+            return
+        data = {
+            "image_width": self.loaded_image.width,
+            "image_height": self.loaded_image.height,
+            "rows": rows,
+            "cols": cols,
+            "vertical_lines": self.vertical_cut_lines,
+            "horizontal_lines": self.horizontal_cut_lines,
+        }
+        try:
+            Path(file_name).write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        except OSError as exc:
+            self._show_error("JSON保存失敗", f"カット線JSONを保存できませんでした。\n{exc}")
+            return
+        self.log(f"カット線JSON保存: {file_name}")
+
+    def load_cut_lines_json(self) -> None:
+        """Load editable cut lines from a JSON preset."""
+        if self.loaded_image is None:
+            self._show_error("画像未選択", "画像ファイルを選択してください。")
+            return
+        rows = self._validate_positive_int(self.rows_var.get(), "rows")
+        cols = self._validate_positive_int(self.cols_var.get(), "cols")
+        if rows is None or cols is None:
+            return
+        file_name = filedialog.askopenfilename(
+            title="カット線JSON読み込み",
+            filetypes=(("JSON files", "*.json"), ("All files", "*.*")),
+        )
+        if not file_name:
+            return
+        try:
+            data = json.loads(Path(file_name).read_text(encoding="utf-8"))
+            if not isinstance(data, dict):
+                raise ValueError("JSONのルートはオブジェクトである必要があります。")
+            vertical_lines = [int(value) for value in data["vertical_lines"]]
+            horizontal_lines = [int(value) for value in data["horizontal_lines"]]
+        except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+            self._show_error("JSON読み込み失敗", f"カット線JSONを読み込めませんでした。\n{exc}")
+            return
+
+        if (
+            data.get("image_width") != self.loaded_image.width
+            or data.get("image_height") != self.loaded_image.height
+            or data.get("rows") != rows
+            or data.get("cols") != cols
+        ):
+            self._show_error("JSON不一致", "JSONの画像サイズ・rows・colsが現在の設定と一致しません。")
+            return
+        if len(vertical_lines) != cols + 1 or len(horizontal_lines) != rows + 1:
+            self._show_error("JSON不一致", "JSON内のカット線数がrows/colsと一致しません。")
+            return
+        if not self._are_valid_cut_lines(vertical_lines, self.loaded_image.width) or not self._are_valid_cut_lines(
+            horizontal_lines, self.loaded_image.height
+        ):
+            self._show_error("JSON不一致", "JSON内のカット線座標が不正です。")
+            return
+
+        self.vertical_cut_lines = vertical_lines
+        self.horizontal_cut_lines = horizontal_lines
+        self.cut_grid_signature = (self.loaded_image.width, self.loaded_image.height, rows, cols)
+        self._update_selected_line_label()
+        self.log(f"カット線JSON読み込み: {file_name}")
+        self.update_preview()
+
+    @staticmethod
+    def _are_valid_cut_lines(lines: list[int], size: int) -> bool:
+        """Return True when cut lines are sorted, bounded, and include fixed outer edges."""
+        return bool(lines) and lines[0] == 0 and lines[-1] == size and all(a < b for a, b in zip(lines, lines[1:]))
+
+    def _on_cut_edit_changed(self) -> None:
+        """Initialize cut lines when edit mode is enabled and refresh the preview."""
+        if self.loaded_image is not None and self.cut_edit_var.get():
+            rows = self._safe_positive_int(self.rows_var.get())
+            cols = self._safe_positive_int(self.cols_var.get())
+            if rows and cols:
+                self._ensure_cut_lines(rows, cols, self.loaded_image.size)
+        self.update_preview()
+
+    def _on_cut_line_press(self, event: tk.Event) -> None:
+        """Select an inner cut line near the pointer."""
+        if not self.cut_edit_var.get() or self.loaded_image is None:
+            return
+        hit = self._nearest_cut_line(event.x, event.y)
+        self.dragging_cut_line = hit
+        self._update_selected_line_label(hit)
+        self._draw_cut_lines_on_canvas()
+
+    def _on_cut_line_drag(self, event: tk.Event) -> None:
+        """Move the selected cut line, clamped to adjacent lines and optional snapping."""
+        if not self.dragging_cut_line or self.loaded_image is None:
+            return
+        rows = self._safe_positive_int(self.rows_var.get())
+        cols = self._safe_positive_int(self.cols_var.get())
+        if not rows or not cols:
+            return
+        self._ensure_cut_lines(rows, cols, self.loaded_image.size)
+        kind, index = self.dragging_cut_line
+        image_x, image_y = self._canvas_to_image_coords(event.x, event.y)
+        min_cell_size = self._effective_min_cell_size(self.loaded_image.size, rows, cols)
+        if kind == "vertical":
+            value = self._snap_coordinate(round(image_x))
+            value = max(self.vertical_cut_lines[index - 1] + min_cell_size, value)
+            value = min(self.vertical_cut_lines[index + 1] - min_cell_size, value)
+            self.vertical_cut_lines[index] = value
+        else:
+            value = self._snap_coordinate(round(image_y))
+            value = max(self.horizontal_cut_lines[index - 1] + min_cell_size, value)
+            value = min(self.horizontal_cut_lines[index + 1] - min_cell_size, value)
+            self.horizontal_cut_lines[index] = value
+        self._update_selected_line_label(self.dragging_cut_line)
+        self._draw_cut_lines_on_canvas()
+
+    def _on_cut_line_release(self, _event: tk.Event) -> None:
+        """Finish dragging and update processed preview."""
+        if self.dragging_cut_line is not None:
+            self.dragging_cut_line = None
+            self.update_preview()
+
+    def _nearest_cut_line(self, canvas_x: int, canvas_y: int) -> Optional[tuple[str, int]]:
+        """Return the nearest movable cut line under the pointer."""
+        if not self.vertical_cut_lines or not self.horizontal_cut_lines:
+            return None
+        hit_distance = 8
+        best: Optional[tuple[str, int]] = None
+        best_distance = hit_distance + 1
+        for index, line_x in enumerate(self.vertical_cut_lines[1:-1], start=1):
+            preview_x = self.before_preview_offset[0] + line_x * self.before_preview_scale
+            distance = abs(canvas_x - preview_x)
+            if distance <= hit_distance and distance < best_distance:
+                best = ("vertical", index)
+                best_distance = distance
+        for index, line_y in enumerate(self.horizontal_cut_lines[1:-1], start=1):
+            preview_y = self.before_preview_offset[1] + line_y * self.before_preview_scale
+            distance = abs(canvas_y - preview_y)
+            if distance <= hit_distance and distance < best_distance:
+                best = ("horizontal", index)
+                best_distance = distance
+        return best
+
+    def _canvas_to_image_coords(self, canvas_x: int, canvas_y: int) -> tuple[float, float]:
+        """Convert preview canvas coordinates to original image coordinates."""
+        offset_x, offset_y = self.before_preview_offset
+        if self.before_preview_scale <= 0:
+            return 0, 0
+        image_x = (canvas_x - offset_x) / self.before_preview_scale
+        image_y = (canvas_y - offset_y) / self.before_preview_scale
+        return image_x, image_y
+
+    def _draw_cut_lines_on_canvas(self) -> None:
+        """Overlay editable cut lines and coordinates on the before-preview canvas."""
+        if not isinstance(self.preview_before_label, tk.Canvas) or not self.loaded_image:
+            return
+        canvas = self.preview_before_label
+        canvas.delete("cut_line")
+        offset_x, offset_y = self.before_preview_offset
+        preview_width, preview_height = self.before_preview_size
+        right = offset_x + preview_width
+        bottom = offset_y + preview_height
+        canvas.create_rectangle(offset_x, offset_y, right, bottom, outline="#ffffff", width=2, tags="cut_line")
+        selected = self.dragging_cut_line
+        for index, line_x in enumerate(self.vertical_cut_lines[1:-1], start=1):
+            x = offset_x + line_x * self.before_preview_scale
+            color = "#00ffff" if selected == ("vertical", index) else "#ffcc00"
+            width = 4 if selected == ("vertical", index) else 2
+            canvas.create_line(x, offset_y, x, bottom, fill=color, width=width, tags="cut_line")
+            canvas.create_text(x + 4, offset_y + 12, text=str(line_x), fill=color, anchor="nw", tags="cut_line")
+        for index, line_y in enumerate(self.horizontal_cut_lines[1:-1], start=1):
+            y = offset_y + line_y * self.before_preview_scale
+            color = "#00ffff" if selected == ("horizontal", index) else "#ffcc00"
+            width = 4 if selected == ("horizontal", index) else 2
+            canvas.create_line(offset_x, y, right, y, fill=color, width=width, tags="cut_line")
+            canvas.create_text(offset_x + 4, y + 4, text=str(line_y), fill=color, anchor="nw", tags="cut_line")
+
+    def _update_selected_line_label(self, selected: Optional[tuple[str, int]] = None) -> None:
+        """Show selected line coordinates and all current cut line positions."""
+        if selected is None:
+            selected_text = "選択中の線: なし"
+        else:
+            kind, index = selected
+            if kind == "vertical" and index < len(self.vertical_cut_lines):
+                selected_text = f"選択中の線: 縦 {index} = {self.vertical_cut_lines[index]}px"
+            elif kind == "horizontal" and index < len(self.horizontal_cut_lines):
+                selected_text = f"選択中の線: 横 {index} = {self.horizontal_cut_lines[index]}px"
+            else:
+                selected_text = "選択中の線: なし"
+        self.selected_line_var.set(
+            f"{selected_text}\n縦: {self.vertical_cut_lines}\n横: {self.horizontal_cut_lines}"
+        )
+
+    def _snap_coordinate(self, value: int) -> int:
+        """Snap a coordinate to the selected unit while dragging."""
+        if not self.snap_var.get():
+            return value
+        unit = self._safe_positive_int(self.snap_unit_var.get()) or 1
+        return round(value / unit) * unit
+
+    def _effective_min_cell_size(self, image_size: tuple[int, int], rows: int, cols: int) -> int:
+        """Return a min cell size that keeps dragging possible even when the requested value is too large."""
+        requested = self._validate_min_cell_size(preview=True)
+        max_possible = max(1, min(image_size[0] // cols, image_size[1] // rows))
+        return min(requested, max_possible)
+
+    def _validate_min_cell_size(self, preview: bool = False) -> int:
+        """Validate the editable cut-line minimum cell size."""
+        result = self._safe_positive_int(self.min_cell_size_var.get())
+        if result is None:
+            if preview:
+                return 128
+            raise ValueError("min_cell_sizeには1以上の整数を入力してください。")
+        return result
 
     def _uses_cell_pipeline(self) -> bool:
         """Return True when tiles should be processed after the initial split."""
@@ -436,7 +839,7 @@ class ImageSplitterApp:
         cell_padding = self._validate_padding_value(self.cell_padding_var.get(), preview)
         scale_limit = self._validate_positive_float(self.scale_limit_var.get(), "scale limit", preview, 2.0)
         min_area = self._validate_non_negative_int(self.min_area_var.get(), "min_area", preview, 1)
-        background = self.background_var.get() if self.post_split_resize_var.get() else self.cell_background_var.get()
+        background = self.background_var.get() if self.post_split_resize_var.get() or self.cut_edit_var.get() else self.cell_background_var.get()
         cell_background = self.cell_background_var.get()
         if background not in {"transparent", "black"}:
             background = "transparent"
@@ -686,24 +1089,49 @@ class ImageSplitterApp:
     def _set_preview_image(
         self,
         image: Image.Image,
-        label: ttk.Label,
+        widget: tk.Canvas,
         slot: str,
         rows: Optional[int],
         cols: Optional[int],
     ) -> None:
-        """Scale a preview image and optionally overlay the split grid."""
+        """Scale a preview image onto a canvas and optionally overlay the split grid."""
         preview = image.copy()
         preview.thumbnail(PREVIEW_MAX_SIZE, Image.Resampling.LANCZOS)
-        if self.show_grid_var.get() and rows and cols:
-            draw = ImageDraw.Draw(preview)
-            self._draw_grid(draw, preview.size, rows, cols)
+        canvas_width, canvas_height = PREVIEW_MAX_SIZE
+        offset_x = (canvas_width - preview.width) // 2
+        offset_y = (canvas_height - preview.height) // 2
 
         photo = ImageTk.PhotoImage(preview)
         if slot == "before":
             self.preview_photo_before = photo
+            self.before_preview_scale = preview.width / image.width if image.width else 1.0
+            self.before_preview_offset = (offset_x, offset_y)
+            self.before_preview_size = preview.size
         else:
             self.preview_photo_after = photo
-        label.configure(image=photo, text="")
+
+        widget.configure(width=canvas_width, height=canvas_height)
+        widget.delete("all")
+        widget.create_image(offset_x, offset_y, image=photo, anchor="nw")
+
+        if self.show_grid_var.get() and rows and cols:
+            self._draw_grid_on_canvas(widget, (offset_x, offset_y), preview.size, rows, cols)
+
+    def _draw_grid_on_canvas(
+        self, canvas: tk.Canvas, offset: tuple[int, int], size: tuple[int, int], rows: int, cols: int
+    ) -> None:
+        """Draw a non-editable red grid over a preview canvas."""
+        offset_x, offset_y = offset
+        width, height = size
+        right = offset_x + width
+        bottom = offset_y + height
+        line_color = "#ff0000"
+        for col in range(1, cols):
+            x = offset_x + round(width * col / cols)
+            canvas.create_line(x, offset_y, x, bottom, fill=line_color, width=2)
+        for row in range(1, rows):
+            y = offset_y + round(height * row / rows)
+            canvas.create_line(offset_x, y, right, y, fill=line_color, width=2)
 
     def _auto_adjust_margins(
         self,
