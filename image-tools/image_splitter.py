@@ -55,8 +55,9 @@ class ImageSplitterApp:
         self.cell_centering_var = tk.BooleanVar(value=True)
         self.detection_mode_var = tk.StringVar(value="auto")
         self.threshold_var = tk.StringVar(value="15")
+        self.alpha_threshold_var = tk.StringVar(value="10")
         self.padding_var = tk.StringVar(value="0")
-        self.min_area_var = tk.StringVar(value="1")
+        self.min_area_var = tk.StringVar(value="100")
 
         self.vertical_cut_lines: list[int] = []
         self.horizontal_cut_lines: list[int] = []
@@ -166,12 +167,14 @@ class ImageSplitterApp:
             state="readonly",
             width=12,
         ).grid(row=1, column=1, sticky="ew", padx=(8, 0), pady=(8, 0))
-        ttk.Label(cell_frame, text="threshold").grid(row=2, column=0, sticky="w", pady=(8, 0))
+        ttk.Label(cell_frame, text="brightness threshold").grid(row=2, column=0, sticky="w", pady=(8, 0))
         ttk.Entry(cell_frame, textvariable=self.threshold_var, width=10).grid(row=2, column=1, sticky="ew", padx=(8, 0), pady=(8, 0))
-        ttk.Label(cell_frame, text="padding").grid(row=3, column=0, sticky="w", pady=(8, 0))
-        ttk.Entry(cell_frame, textvariable=self.padding_var, width=10).grid(row=3, column=1, sticky="ew", padx=(8, 0), pady=(8, 0))
-        ttk.Label(cell_frame, text="min_area").grid(row=4, column=0, sticky="w", pady=(8, 0))
-        ttk.Entry(cell_frame, textvariable=self.min_area_var, width=10).grid(row=4, column=1, sticky="ew", padx=(8, 0), pady=(8, 0))
+        ttk.Label(cell_frame, text="alpha threshold").grid(row=3, column=0, sticky="w", pady=(8, 0))
+        ttk.Entry(cell_frame, textvariable=self.alpha_threshold_var, width=10).grid(row=3, column=1, sticky="ew", padx=(8, 0), pady=(8, 0))
+        ttk.Label(cell_frame, text="padding").grid(row=4, column=0, sticky="w", pady=(8, 0))
+        ttk.Entry(cell_frame, textvariable=self.padding_var, width=10).grid(row=4, column=1, sticky="ew", padx=(8, 0), pady=(8, 0))
+        ttk.Label(cell_frame, text="min_area").grid(row=5, column=0, sticky="w", pady=(8, 0))
+        ttk.Entry(cell_frame, textvariable=self.min_area_var, width=10).grid(row=5, column=1, sticky="ew", padx=(8, 0), pady=(8, 0))
 
         output_frame = ttk.LabelFrame(parent, text="出力フォルダ", padding=10)
         output_frame.grid(row=4, column=0, sticky="ew", pady=(0, 10))
@@ -234,6 +237,7 @@ class ImageSplitterApp:
             self.cell_centering_var,
             self.detection_mode_var,
             self.threshold_var,
+            self.alpha_threshold_var,
             self.padding_var,
             self.min_area_var,
         ):
@@ -340,9 +344,10 @@ class ImageSplitterApp:
             "output_height": self._validate_positive_field(self.output_height_var.get(), "output height", preview, 256),
             "cell_centering": self.cell_centering_var.get(),
             "detection_mode": self.detection_mode_var.get(),
-            "threshold": self._validate_threshold_value(self.threshold_var.get(), preview),
+            "threshold": self._validate_threshold_value(self.threshold_var.get(), "brightness threshold", preview, 15),
+            "alpha_threshold": self._validate_threshold_value(self.alpha_threshold_var.get(), "alpha threshold", preview, 10),
             "padding": self._validate_padding_value(self.padding_var.get(), preview),
-            "min_area": self._validate_non_negative_int(self.min_area_var.get(), "min_area", preview, 1),
+            "min_area": self._validate_non_negative_int(self.min_area_var.get(), "min_area", preview, 100),
         }
 
     def _build_output_preview(self, rows: int, cols: int) -> Image.Image:
@@ -383,6 +388,7 @@ class ImageSplitterApp:
                 int(settings["threshold"]),
                 int(settings["padding"]),
                 int(settings["min_area"]),
+                int(settings["alpha_threshold"]),
             )
             if centered is None:
                 if index is not None:
@@ -393,11 +399,17 @@ class ImageSplitterApp:
         return self._contain_center_on_canvas(source, int(settings["output_width"]), int(settings["output_height"]))
 
     def _remove_cell_margins(
-        self, tile: Image.Image, detection_mode: str, threshold: int, padding: int, min_area: int
+        self,
+        tile: Image.Image,
+        detection_mode: str,
+        threshold: int,
+        padding: int,
+        min_area: int,
+        alpha_threshold: int,
     ) -> Optional[Image.Image]:
         """Detect a cell bbox, crop it, and add transparent padding."""
-        mode = self._resolve_detection_mode(tile, detection_mode)
-        bbox = self._find_content_bbox(tile, mode, threshold, min_area)
+        mode = self._resolve_detection_mode(tile, detection_mode, alpha_threshold)
+        bbox = self._find_content_bbox(tile, mode, threshold, min_area, alpha_threshold)
         if bbox is None:
             return None
         left, top, right, bottom = bbox
@@ -415,33 +427,90 @@ class ImageSplitterApp:
         canvas.alpha_composite(resized, (x, y))
         return canvas
 
-    def _resolve_detection_mode(self, image: Image.Image, selected: str) -> str:
+    def _resolve_detection_mode(self, image: Image.Image, selected: str, alpha_threshold: int) -> str:
         """Resolve alpha/brightness/auto detection for a cell."""
         if selected in {"alpha", "brightness"}:
             return selected
-        return "alpha" if image.getchannel("A").getextrema()[0] < 255 else "brightness"
+        return "alpha" if image.getchannel("A").getextrema()[0] <= alpha_threshold else "brightness"
 
     def _find_content_bbox(
-        self, image: Image.Image, mode: str, threshold: int, min_area: int
+        self, image: Image.Image, mode: str, threshold: int, min_area: int, alpha_threshold: int
     ) -> Optional[tuple[int, int, int, int]]:
-        """Return the bbox of valid pixels, ignoring masks smaller than min_area."""
-        mask = self._content_mask(image, mode, threshold)
-        active_pixels = sum(count for value, count in enumerate(mask.histogram()) if value > 0)
-        if active_pixels < min_area:
-            return None
-        return mask.getbbox()
+        """Return the bbox of connected valid-pixel components that are large enough."""
+        mask = self._content_mask(image, mode, threshold, alpha_threshold)
+        return self._connected_components_bbox(mask, min_area)
 
-    def _content_mask(self, image: Image.Image, mode: str, threshold: int) -> Image.Image:
+    def _content_mask(self, image: Image.Image, mode: str, threshold: int, alpha_threshold: int) -> Image.Image:
         """Build an L-mode mask for alpha or brightness content detection."""
+        alpha = image.getchannel("A")
+        alpha_mask = alpha.point(lambda value: 255 if value > alpha_threshold else 0)
         if mode == "alpha":
-            return image.getchannel("A").point(lambda alpha: 255 if alpha > 0 else 0)
+            return alpha_mask
 
         rgb = image.convert("RGB")
-        alpha = image.getchannel("A")
         brightness = rgb.convert("L", matrix=(0.299, 0.587, 0.114, 0))
         bright_mask = brightness.point(lambda value: 255 if value >= threshold else 0)
-        alpha_mask = alpha.point(lambda value: 255 if value > 0 else 0)
         return ImageChops.multiply(bright_mask, alpha_mask)
+
+    def _connected_components_bbox(self, mask: Image.Image, min_area: int) -> Optional[tuple[int, int, int, int]]:
+        """Compute bbox from connected components at or above min_area, ignoring isolated noise."""
+        width, height = mask.size
+        pixels = mask.load()
+        visited: set[tuple[int, int]] = set()
+        kept_bbox: Optional[tuple[int, int, int, int]] = None
+
+        for y in range(height):
+            for x in range(width):
+                if (x, y) in visited or pixels[x, y] == 0:
+                    continue
+
+                stack = [(x, y)]
+                visited.add((x, y))
+                area = 0
+                left = right = x
+                top = bottom = y
+
+                while stack:
+                    current_x, current_y = stack.pop()
+                    area += 1
+                    left = min(left, current_x)
+                    right = max(right, current_x)
+                    top = min(top, current_y)
+                    bottom = max(bottom, current_y)
+
+                    for next_x, next_y in (
+                        (current_x - 1, current_y),
+                        (current_x + 1, current_y),
+                        (current_x, current_y - 1),
+                        (current_x, current_y + 1),
+                    ):
+                        if not (0 <= next_x < width and 0 <= next_y < height):
+                            continue
+                        if (next_x, next_y) in visited or pixels[next_x, next_y] == 0:
+                            continue
+                        visited.add((next_x, next_y))
+                        stack.append((next_x, next_y))
+
+                if area < min_area:
+                    continue
+                component_bbox = (left, top, right + 1, bottom + 1)
+                kept_bbox = self._union_bbox(kept_bbox, component_bbox)
+
+        return kept_bbox
+
+    @staticmethod
+    def _union_bbox(
+        bbox: Optional[tuple[int, int, int, int]], component_bbox: tuple[int, int, int, int]
+    ) -> tuple[int, int, int, int]:
+        """Return the union of an existing bbox and a component bbox."""
+        if bbox is None:
+            return component_bbox
+        return (
+            min(bbox[0], component_bbox[0]),
+            min(bbox[1], component_bbox[1]),
+            max(bbox[2], component_bbox[2]),
+            max(bbox[3], component_bbox[3]),
+        )
 
     def _crop_with_padding(self, image: Image.Image, box: tuple[int, int, int, int]) -> Image.Image:
         """Crop an RGBA image, padding outside source bounds with transparency."""
@@ -814,18 +883,20 @@ class ImageSplitterApp:
             raise ValueError(f"{field_name}には0以上の整数を入力してください。")
         return result
 
-    def _validate_threshold_value(self, value: str, preview: bool = False) -> int:
-        """Validate a brightness threshold value."""
+    def _validate_threshold_value(
+        self, value: str, field_name: str = "threshold", preview: bool = False, fallback: int = 15
+    ) -> int:
+        """Validate a 0-255 threshold value."""
         try:
             threshold = int(value)
         except ValueError as exc:
             if preview:
-                return 15
-            raise ValueError("thresholdには0〜255の整数を入力してください。") from exc
+                return fallback
+            raise ValueError(f"{field_name}には0〜255の整数を入力してください。") from exc
         if not 0 <= threshold <= 255:
             if preview:
-                return 15
-            raise ValueError("thresholdには0〜255の整数を入力してください。")
+                return fallback
+            raise ValueError(f"{field_name}には0〜255の整数を入力してください。")
         return threshold
 
     def _validate_padding_value(self, value: str, preview: bool = False) -> int:

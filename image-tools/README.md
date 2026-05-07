@@ -62,6 +62,7 @@ python -m pip install Pillow
 - セル個別余白除去・センタリング ON/OFF
 - `detection mode`: `alpha`, `brightness`, `auto`
 - `threshold`
+- `alpha threshold`
 - `padding`
 - `min_area`
 - プレビュー
@@ -119,17 +120,18 @@ python -m pip install Pillow
 
 ### detection mode
 
-- `alpha`: 透明度で有効ピクセルを判定します。
-- `brightness`: 黒背景素材向けに、輝度が `threshold` 以上のピクセルを有効ピクセルとして判定します。
+- `alpha`: `alpha threshold` より大きい透明度のピクセルを有効ピクセルとして判定します。
+- `brightness`: 黒背景素材向けに、輝度が `threshold` 以上かつ `alpha threshold` より大きいピクセルを有効ピクセルとして判定します。
 - `auto`: 透明情報があれば `alpha`、なければ `brightness` を使用します。
 
 ### その他の設定
 
-- `threshold`: brightness 判定で有効ピクセルとする輝度の下限です。
+- `threshold`: brightness 判定で有効ピクセルとする輝度の下限です。初期値は `15` です。
+- `alpha threshold`: alpha 判定で透明扱いにする透明度の上限です。`alpha <= threshold` のピクセルは透明扱いになります。初期値は `10` です。
 - `padding`: 検出した外接矩形の周囲に追加する透明余白です。
-- `min_area`: 有効ピクセル数がこの値未満の場合、小さい孤立点として無視します。
+- `min_area`: connected components で分離した領域のうち、この値未満の小さい孤立ピクセルや細かいゴミを無視します。初期値は `100` です。
 
-有効ピクセルが検出できないセルは、ログに警告を出し、透明な空セルとして指定サイズに保存します。
+有効ピクセルは connected components で領域分離し、`min_area` 以上の領域だけをbbox計算に使います。有効ピクセルが検出できないセルは、ログに警告を出し、透明な空セルとして指定サイズに保存します。
 
 ## 出力仕様
 
