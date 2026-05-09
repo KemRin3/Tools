@@ -1,0 +1,5 @@
+dir:素材作成/00_rules/
+file:素材作成/00_rules/texture_rules.md
+file:素材作成/00_rules/prompt_rules.md
+dir:素材作成/01_source/
+dir:素材作成/01_source/particles/
